@@ -1,0 +1,32 @@
+{
+  "name": "koto-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Koto's server: transcription with Sarvam Saaras v4, optional tidy-up with Gemini, and cloud backup to R2.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --experimental-strip-types --no-warnings test/*.test.ts"
+  },
+  "cloudflare": {
+    "label": "Koto server",
+    "products": ["Workers", "R2"],
+    "categories": ["ai"],
+    "bindings": {
+      "KOTO_ACCESS_KEY": {
+        "description": "A long random password that only your copy of Koto knows, at least 16 characters. Generate one with `openssl rand -hex 32`, then type it into Koto: Settings, Server, Access key."
+      },
+      "BACKUPS": {
+        "description": "Where cloud backups of your voice notes and history are kept. R2's free tier covers 10 GB."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261011.1",
+    "@types/node": "22.15.0",
+    "typescript": "5.8.3",
+    "wrangler": "4.149.0"
+  }
+}

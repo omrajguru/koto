@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env
+.dev.vars
+.wrangler/
+# Signing keys never belong in the repository.
+*.pfx
+*.pem

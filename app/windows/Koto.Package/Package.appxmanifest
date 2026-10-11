@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap4 uap5 desktop rescap">
+
+  <Identity
+    Name="Koto"
+    Publisher="CN=Koto"
+    Version="1.0.0.0" />
+
+  <Properties>
+    <DisplayName>Koto</DisplayName>
+    <PublisherDisplayName>Koto</PublisherDisplayName>
+    <Logo>Images\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate"/>
+  </Resources>
+
+  <Applications>
+    <Application Id="App"
+      Executable="$targetnametoken$.exe"
+      EntryPoint="$targetentrypoint$">
+      <uap:VisualElements
+        DisplayName="Koto"
+        Description="Dictate into any app with Ctrl + Win."
+        BackgroundColor="transparent"
+        Square150x150Logo="Images\Square150x150Logo.png"
+        Square44x44Logo="Images\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Images\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="Images\SplashScreen.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- Starts Koto in the background at sign-in so the hotkey works without opening it. -->
+        <!-- The packaging tools only fill in $targetnametoken$ on <Application>, so this path is literal: the packaging project places Koto.exe in a Koto folder. -->
+        <uap5:Extension Category="windows.startupTask" Executable="Koto\Koto.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask TaskId="KotoStartup" Enabled="true" DisplayName="Koto" />
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="runFullTrust" />
+    <!-- Lets Koto install its own updates (Settings, Update and restart). -->
+    <rescap:Capability Name="packageManagement" />
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+</Package>

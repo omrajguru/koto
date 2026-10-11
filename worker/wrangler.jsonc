@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "koto-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  // Buffer, for decoding audio and backup parts.
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  // Cloud backup of voice notes and history. Optional: without it, everything else works.
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "koto-backups" }]
+}

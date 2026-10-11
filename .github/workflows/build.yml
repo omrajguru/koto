@@ -1,0 +1,203 @@
+name: Build
+
+# Pushes and pull requests run the tests. Installers are built and released when asked for:
+# Actions, Build, Run workflow (with release notes).
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: What changed in this version (shown in Koto and on the release page)
+        required: false
+        default: ''
+
+# A newer push to the same branch cancels the run still going for the older one. Release
+# builds are in their own group, so a routine push can never cancel one in progress.
+concurrency:
+  group: build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: App tests, typecheck and lint
+        working-directory: app
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npx jest
+          npx eslint src __tests__ index.js
+      - name: Server tests and typecheck
+        working-directory: worker
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
+  windows:
+    needs: checks
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    strategy:
+      # If one architecture fails the other would fail the same way.
+      fail-fast: true
+      matrix:
+        platform: [x64, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: microsoft/setup-msbuild@v2
+
+      # Cheap check first: catches manifest mistakes in seconds instead of after a full compile.
+      - name: Validate package manifest
+        shell: pwsh
+        run: app/windows/validate-package-manifest.ps1
+
+      - name: Restore NuGet cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ matrix.platform }}-${{ hashFiles('app/windows/**/*.vcxproj', 'app/windows/**/*.wapproj', 'app/package-lock.json') }}
+          restore-keys: nuget-${{ matrix.platform }}-
+
+      - name: Install dependencies
+        working-directory: app
+        run: npm ci
+
+      # Every build is signed with the same certificate (stored as encrypted secrets), so Windows
+      # accepts each new version as an update to the installed one. Its public half is attached
+      # to each release as Koto-signing.cer, which people trust once before the first install.
+      - name: Prepare signing certificate and version
+        id: package
+        shell: pwsh
+        env:
+          SIGNING_CERTIFICATE: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          if (-not $env:SIGNING_CERTIFICATE) { throw "The WINDOWS_SIGNING_CERTIFICATE secret is not set." }
+          $pfx = [Convert]::FromBase64String($env:SIGNING_CERTIFICATE)
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\koto-signing.pfx", $pfx)
+          $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($pfx, $env:SIGNING_PASSWORD, $flags)
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\artifacts" | Out-Null
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\artifacts\Koto-signing.cer", $certificate.Export('Cert'))
+          $manifest = 'app/windows/Koto.Package/Package.appxmanifest'
+          if (-not (Select-String -Path $manifest -Pattern "Publisher=""$($certificate.Subject)""" -SimpleMatch -Quiet)) {
+            throw "The manifest's Publisher must be ""$($certificate.Subject)"", the certificate's subject."
+          }
+          # Each build gets a higher version, which Windows requires for an update.
+          $version = "1.0.${{ github.run_number }}.0"
+          (Get-Content $manifest -Raw) -replace 'Version="1\.0\.0\.0"', "Version=""$version""" | Set-Content $manifest -NoNewline
+          if (-not (Select-String -Path $manifest -Pattern "Version=""$version""" -Quiet)) { throw "Could not set the package version." }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Building Koto $version"
+
+      - name: Choose C++ toolset and Windows SDK
+        id: toolset
+        shell: pwsh
+        run: |
+          # The project targets the newest toolset (v145, Visual Studio 2026). Fall back to v143 on images with Visual Studio 2022.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $version = & $vswhere -latest -property installationVersion
+          $toolset = if ([version]$version -ge [version]"18.0") { "v145" } else { "v143" }
+          "toolset=$toolset" >> $env:GITHUB_OUTPUT
+          Write-Host "Visual Studio $version, toolset $toolset"
+          # react-native-windows defaults to SDK 10.0.22621.0, which newer runner images no longer
+          # include. Build against the newest installed SDK that is at least that version.
+          $sdks = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory |
+            Where-Object { $_.Name -match '^10\.0\.\d+\.0$' -and (Test-Path "$($_.FullName)\um\windows.h") } |
+            ForEach-Object { [version]$_.Name } | Where-Object { $_ -ge [version]"10.0.22621.0" } | Sort-Object -Descending
+          if (-not $sdks) { throw "No Windows SDK 10.0.22621 or newer is installed." }
+          "sdk=$($sdks[0])" >> $env:GITHUB_OUTPUT
+          Write-Host "Windows SDK $($sdks[0])"
+
+      - name: Build MSIX
+        working-directory: app/windows
+        shell: pwsh
+        env:
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          msbuild Koto.sln /restore /m /v:minimal `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            /p:PlatformToolset=${{ steps.toolset.outputs.toolset }} `
+            /p:WindowsTargetPlatformVersion=${{ steps.toolset.outputs.sdk }} `
+            /p:TargetPlatformVersion=${{ steps.toolset.outputs.sdk }} `
+            /p:AppxBundle=Never `
+            /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxPackageDir="$env:GITHUB_WORKSPACE\artifacts\" `
+            /p:PackageCertificateKeyFile="$env:RUNNER_TEMP\koto-signing.pfx" `
+            /p:PackageCertificatePassword="$env:SIGNING_PASSWORD" `
+            /p:AppxPackageSigningEnabled=true `
+            /bl:"$env:GITHUB_WORKSPACE\artifacts\build.binlog"
+          Remove-Item "$env:RUNNER_TEMP\koto-signing.pfx"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: koto-windows-${{ matrix.platform }}
+          path: artifacts/
+          if-no-files-found: warn
+
+  # Publishes a GitHub release. Installed copies of Koto read the latest release and offer
+  # "Update and restart" when it is newer than they are.
+  publish:
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: 1.0.${{ github.run_number }}
+      NOTES: ${{ github.event.inputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+      - name: Collect installers
+        run: |
+          set -euo pipefail
+          mkdir release
+          for platform in x64 ARM64; do
+            # Visual Studio's sideload folder: Koto's .msix, its runtime dependencies and Install.ps1.
+            test_folder=$(find "downloads/koto-windows-$platform" -type d -name '*_Test' | head -1)
+            if [ -z "$test_folder" ]; then
+              echo "No sideload folder found for $platform"; exit 1
+            fi
+            msix=$(find "$test_folder" -maxdepth 1 -name '*.msix' | head -1)
+            cp "$msix" "release/Koto-$platform.msix"
+            (cd "$(dirname "$test_folder")" && zip -qr "$GITHUB_WORKSPACE/release/Koto-$platform-installer.zip" "$(basename "$test_folder")")
+          done
+          cp downloads/koto-windows-x64/Koto-signing.cer release/Koto-signing.cer
+          ls -la release
+          if [ -z "$NOTES" ]; then
+            NOTES="$(git log -1 --format=%s 2>/dev/null || true)"
+          fi
+          {
+            echo 'NOTES<<KOTO_NOTES'
+            echo "$NOTES"
+            echo 'KOTO_NOTES'
+          } >> "$GITHUB_ENV"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" release/* \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Koto $VERSION" \
+            --notes "$NOTES
+
+          First install: open Koto-signing.cer, choose Install Certificate, Local Machine, and place it in Trusted People. Then open Koto-x64.msix, or Koto-ARM64.msix on ARM PCs. Koto-<platform>-installer.zip also contains the Windows runtime packages, for PCs that do not have them yet. Installed copies of Koto offer this version in Settings."
